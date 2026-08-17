@@ -33,12 +33,12 @@ English | [简体中文](README.md) | [Releases](https://github.com/harry0703/Mo
 ## Special Thanks ❤️
 
 <div align="center">
-  <a href="https://platform.kimi.ai/?aff=MoneyPrinterTurbo" target="_blank"><img src="https://gcdn.moonshot.cn/growth-cdn/sponsor/kimi-en.png" alt="Kimi sponsors MoneyPrinterTurbo" width="100%"></a>
+  <a href="https://platform.kimi.ai?track_id=track-f6b0a640d35c41deb03b247242a1058c&aff=moneyprinterturbo" target="_blank"><img src="https://gcdn.moonshot.cn/growth-cdn/sponsor/kimi-en.png" alt="Kimi sponsors MoneyPrinterTurbo" width="100%"></a>
 </div>
 
-Thanks to [Kimi](https://platform.kimi.ai/?aff=MoneyPrinterTurbo) for sponsoring this project! [Kimi K3](https://www.kimi.com/blog/kimi-k3?aff=MoneyPrinterTurbo) is Moonshot AI's most capable model and the world's first open 3T-class model. With native vision and a 1-million-token context window, K3 delivers frontier performance across knowledge work, reasoning, and long-horizon tasks. Within MoneyPrinterTurbo, K3 powers video creation by writing scripts and extracting the search keywords that determine the final footage—the better it understands the content, the more relevant the results.
+Thanks to [Kimi](https://platform.kimi.ai?track_id=track-f6b0a640d35c41deb03b247242a1058c&aff=moneyprinterturbo) for sponsoring this project! [Kimi K3](https://www.kimi.com/blog/kimi-k3?aff=moneyprinterturbo) is Moonshot AI's most capable model and the world's first open 3T-class model. With native vision and a 1-million-token context window, K3 delivers frontier performance across knowledge work, reasoning, and long-horizon tasks. Within MoneyPrinterTurbo, K3 powers video creation by writing scripts and extracting the search keywords that determine the final footage—the better it understands the content, the more relevant the results.
 
-**MoneyPrinterTurbo already supports Kimi. Visit the Kimi Open Platform ([中文站](https://platform.kimi.com/?aff=MoneyPrinterTurbo) | [Global](https://platform.kimi.ai/?aff=MoneyPrinterTurbo)) to try the API, or explore the [Kimi Code subscription](https://www.kimi.com/code?aff=MoneyPrinterTurbo).**
+**Exclusive offer for MoneyPrinterTurbo users: new users who register through the dedicated link receive bonus API credit equal to 10% of their first successful top-up, up to CNY 1,000. The offer ends September 30, 2026. Visit the Kimi Open Platform ([中文站](https://platform.kimi.com?track_id=track-2f5441d6ffd84c509dd079d78e9db5dc&aff=moneyprinterturbo) | [Global](https://platform.kimi.ai?track_id=track-f6b0a640d35c41deb03b247242a1058c&aff=moneyprinterturbo)) to try the API.**
 
 <br>
 <table align="center">
@@ -62,29 +62,15 @@ Thanks to [Kimi](https://platform.kimi.ai/?aff=MoneyPrinterTurbo) for sponsoring
   </tr>
   <tr>
     <td align="center" width="120">
-      <a href="https://cubence.com/signup?code=SCE1CJPE&source=mpt"><img src="docs/sponsors/cubence-logo.png" alt="Cubence" height="40"></a><br>
-      <a href="https://cubence.com/signup?code=SCE1CJPE&source=mpt"><strong>Cubence</strong></a>
+      <a href="https://infistar.ai/register?aff=6T4EYXP2&amp;ref_source=link"><img src="docs/sponsors/infistar-logo.svg" alt="Infistar.ai" height="56"></a><br>
+      <a href="https://infistar.ai/register?aff=6T4EYXP2&amp;ref_source=link"><strong>Infistar.ai</strong></a>
     </td>
     <td align="left">
-      Thanks to <a href="https://cubence.com/signup?code=SCE1CJPE&source=mpt">Cubence</a> for supporting this project. Cubence is a platform focused on AI model API access, helping developers and teams call models in a stable and convenient way. Since its launch in September 2025, Cubence has supported API access scenarios for Claude Code, Codex, Gemini, and other AI models and developer tools, making it suitable for users who need unified management and access to multiple model capabilities. Cubence offers MoneyPrinterTurbo users an exclusive discount code: <a href="https://cubence.com/signup?code=SCE1CJPE&source=mpt"><code>MPT</code></a>. Use it on your first purchase to get <a href="https://cubence.com/signup?code=SCE1CJPE&source=mpt">10% off</a>.
-    </td>
-  </tr>
-  <tr>
-    <td align="center" width="120">
-      <a href="https://www.quya.org/?promo=AFF1"><img src="docs/sponsors/0029-logo.jpg" alt="0029.org" height="56"></a><br>
-      <a href="https://www.quya.org/?promo=AFF1"><strong>0029.org</strong></a>
-    </td>
-    <td align="left">
-      Thanks to <a href="https://www.quya.org/?promo=AFF1">0029.org</a> for sponsoring this project! 0029.org is a one-stop AI API relay platform offering the latest models for Claude Code, Codex, and Gemini. It provides stable, responsive, and cost-effective access through monthly subscriptions or pay-as-you-go plans, supports both individual and enterprise users, and is directly accessible from mainland China without a VPN. Pricing starts at 1.2% of official rates. <a href="https://www.quya.org/?promo=AFF1">Visit 0029.org</a>.
-    </td>
-  </tr>
-  <tr>
-    <td align="center" width="120">
-      <a href="https://ergouapi.com/r/gh-moneyprinterturbo"><img src="docs/sponsors/ergou-api-logo.png" alt="Ergou API" height="56"></a><br>
-      <a href="https://ergouapi.com/r/gh-moneyprinterturbo"><strong>Ergou API</strong></a>
-    </td>
-    <td align="left">
-      Thanks to <a href="https://ergouapi.com/r/gh-moneyprinterturbo">Ergou API</a> for sponsoring this project! Ergou API: The rock-solid AI API Gateway. Unlock ultra-low multipliers (0.1x - 0.2x) across the board. We provide 100% genuine, unfiltered endpoints for top-tier LLMs including Claude, GPT, and Gemini. Powered by premium IPLC routes and dual residential ISP redundancy, Ergou guarantees battle-tested stability and ultra-low latency for your global traffic. Built for developers and studios. <a href="https://ergouapi.com/r/gh-moneyprinterturbo">Sign up and start building today</a>.
+      Thanks to <a href="https://infistar.ai/register?aff=6T4EYXP2&amp;ref_source=link">Infistar.ai</a> for sponsoring this project!<br>
+      ⚡ Low-cost, reliable access: pricing starts at just 10% of official rates, with transparent model multipliers and detailed usage records. Dynamic routing across multiple providers helps avoid rate limits and unexpected service interruptions.<br>
+      🧠 Leading LLMs for script creation: access OpenAI, Claude, Google Gemini, DeepSeek, Qwen, and other leading models through an OpenAI-compatible API. Infistar.ai provides low-latency, high-concurrency support for MoneyPrinterTurbo's script generation and media keyword extraction workflows.<br>
+      🎨 A cutting-edge multimodal ecosystem: access leading image and video generation models including FLUX, Midjourney, Seedance, Kling, Sora, and Luma, all ready for the next generation of AI video creation.<br>
+      🎁 Exclusive benefits for MoneyPrinterTurbo users: sign up through the <a href="https://infistar.ai/register?aff=6T4EYXP2&amp;ref_source=link">dedicated referral link</a> to receive [exclusive bonus credits / a first top-up offer] and start creating right away!
     </td>
   </tr>
   <tr>
