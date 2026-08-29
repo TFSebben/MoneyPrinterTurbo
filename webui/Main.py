@@ -48,6 +48,7 @@ from app.services import (
     llm,
     loomloom,
     video,
+    volcengine_seedance,
     voice,
     webui_task,
 )
@@ -98,6 +99,11 @@ VOICE_MODE_TTS = "tts"
 VOICE_MODE_UPLOAD = "upload"
 VOICE_MODE_NONE = "none"
 LOOMLOOM_MAX_POLL_FAILURES = 5
+# Upload-Post 的 API Key 与发布用户分别在两个页面管理，并且发布用户名称
+# 不等于登录邮箱。集中维护入口可以避免多语言文案各自硬编码 URL 后发生偏差，
+# 也方便用户从 WebUI 直接完成首次配置和后续账号维护。
+UPLOAD_POST_API_KEYS_URL = "https://app.upload-post.com/api-keys"
+UPLOAD_POST_MANAGE_USERS_URL = "https://app.upload-post.com/manage-users"
 # “默认”是 WebUI 专用哨兵，不会写入 config.toml，也不会传给 FFmpeg。
 # 后端在 video_codec 未配置时继续采用稳定的 libx264；单独保留该哨兵可以区分
 # “跟随项目默认策略”和“用户明确固定 libx264”，便于未来安全调整默认策略。
@@ -138,8 +144,64 @@ _RUNTIME_CONFIG_SECTIONS = {
     "elevenlabs": config.elevenlabs,
     "minimax_tts": config.minimax_tts,
     "siliconflow": config.siliconflow,
+    "fish_audio": config.fish_audio,
     "ui": config.ui,
 }
+# 设置预设与密钥备份使用各自的文件标识。导入时先校验 schema 和版本，
+# 避免把任务记录、config.toml 或其它 JSON 误当成本功能的导出文件。
+SETTINGS_PRESET_SCHEMA = "moneyprinterturbo.settings-preset"
+SETTINGS_PRESET_VERSION = 1
+SETTINGS_PRESET_FILE_NAME = "moneyprinterturbo-settings.json"
+KEY_BACKUP_SCHEMA = "moneyprinterturbo.key-backup"
+KEY_BACKUP_VERSION = 1
+KEY_BACKUP_FILE_NAME = "moneyprinterturbo-keys.json"
+# 预设只描述生成参数。素材、配音和配乐都是本机文件路径，预设通常要在另一台
+# 机器或另一个容器里导入，带上这些路径只会指向不存在的文件。
+PRESET_EXCLUDED_PARAM_KEYS = frozenset(
+    {
+        "video_materials",
+        "custom_audio_file",
+        "bgm_file",
+    }
+)
+# 密钥按配置项名称后缀识别。新增 Provider 只要沿用现有命名，就会自动进入
+# 备份，不需要再维护第二份密钥清单。
+CREDENTIAL_KEY_SUFFIXES = (
+    "api_key",
+    "api_keys",
+    "api_token",
+    "access_key",
+    "secret_key",
+    "speech_key",
+)
+# 只恢复密钥而不恢复配套配置项时，凭据仍然不可用。这些配套项与密钥一起备份。
+CREDENTIAL_COMPANION_KEYS = {
+    # Azure 语音必须同时知道区域。
+    "azure": ("speech_region",),
+    # Provider 的额外字段由 Registry 声明，例如 Cloudflare AI Gateway 的
+    # Account ID 和 Gateway ID。只恢复 API Key 而丢掉这些字段时，换到另一台
+    # 机器后该 Provider 仍然无法调用。从 Registry 读取可以让以后新增的
+    # Provider 自动进入备份，不需要在这里维护第二份字段清单。
+    "app": tuple(
+        provider.config_key(field.config_suffix)
+        for provider in LLM_PROVIDER_REGISTRY
+        for field in provider.extra_fields
+    ),
+}
+
+NON_LLM_COMPANION_KEYS = {
+    "app": ("upload_post_username",)
+}
+# 同一个密钥在不同面板可能使用各自的控件 key：音频面板直接编辑 Gemini 和
+# MiMo 的 LLM 密钥，胜算云密钥的控件没有 _input 后缀。恢复备份时必须清除
+# 每一个别名，否则遗留的旧值会在下一次 rerun 覆盖刚刚恢复的密钥。
+CREDENTIAL_WIDGET_STATE_ALIASES = {
+    ("app", "gemini_api_key"): ("gemini_tts_api_key_input",),
+    ("app", "mimo_api_key"): ("mimo_tts_api_key_input",),
+    ("app", "loomloom_api_token"): ("loomloom_user_api_token",),
+}
+# ui 分区只保存界面偏好，不含任何凭据，备份时整体跳过。
+KEY_BACKUP_EXCLUDED_SECTIONS = frozenset({"ui"})
 
 
 # -----------------------------------------------------------------------------
@@ -470,6 +532,8 @@ def _initialize_session_state():
         "loomloom_video_input_signature": "",
         "loomloom_video_client_request_id": "",
         "loomloom_video_confirm_charge": False,
+        "wavespeed_confirm_charge": False,
+        "volcengine_seedance_confirm_charge": False,
         # AI 视频按素材段计费，默认只生成一段，用户确认效果后再主动增加数量。
         "loomloom_video_scene_count": _saved_ui_number(
             "loomloom_video_scene_count",
@@ -807,14 +871,29 @@ def _collect_task_summaries(limit=20):
     return sorted(tasks, key=lambda item: item["mtime"], reverse=True)[:limit]
 
 
+def _is_headless_server():
+    # Docker 或无桌面的服务器部署中，WebUI 进程接触不到用户的桌面环境：
+    # xdg-open / webbrowser 只会在容器内静默失败。此时应改为浏览器内预览
+    # 视频、以路径提示代替打开目录。macOS/Windows 桌面部署不受影响。
+    if sys.platform == "darwin" or sys.platform.startswith("win"):
+        return False
+    return not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+
+
 def _open_task_path(task_path):
     tasks_root = os.path.abspath(utils.task_dir())
     normalized_path = os.path.abspath(task_path)
     if not normalized_path.startswith(tasks_root + os.sep):
         logger.warning(f"invalid task folder path: {normalized_path}")
         return
-    if os.path.isdir(normalized_path):
-        webbrowser.open(f"file://{normalized_path}")
+    if not os.path.isdir(normalized_path):
+        return
+    if _is_headless_server():
+        # storage 目录通常以卷挂载映射回宿主机，提示相对路径即可定位文件。
+        rel_path = os.path.relpath(normalized_path, os.path.dirname(tasks_root))
+        st.toast(f"{tr('Open Task Folder')}: ./storage/{rel_path}", icon="📂")
+        return
+    webbrowser.open(f"file://{normalized_path}")
 
 
 def _open_task_video(video_file):
@@ -828,6 +907,11 @@ def _open_task_video(video_file):
         return
     if not os.path.isfile(normalized_file):
         logger.warning(f"task video does not exist: {normalized_file}")
+        return
+
+    if _is_headless_server():
+        # 无桌面环境时在任务面板内嵌播放器预览，代替调用系统播放器。
+        st.session_state["task_preview_video_file"] = normalized_file
         return
 
     try:
@@ -1043,6 +1127,37 @@ def _render_task_manager_panel(tasks=None):
             ]
             _render_task_table(filtered_tasks, status_key)
 
+    _render_task_video_preview()
+
+
+def _render_task_video_preview():
+    # 无桌面部署下“播放”按钮的浏览器内回退：在任务面板底部渲染播放器。
+    preview_file = st.session_state.get("task_preview_video_file")
+    if not preview_file:
+        return
+
+    tasks_root = os.path.abspath(utils.task_dir())
+    if not (
+        preview_file.startswith(tasks_root + os.sep) and os.path.isfile(preview_file)
+    ):
+        st.session_state.pop("task_preview_video_file", None)
+        return
+
+    st.divider()
+    preview_cols = st.columns([5, 1], vertical_alignment="center")
+    task_name = os.path.basename(os.path.dirname(preview_file))
+    preview_cols[0].caption(f"{os.path.basename(preview_file)} · {task_name}")
+    closed = preview_cols[1].button(
+        "✕",
+        key="close_task_video_preview",
+        use_container_width=True,
+        help=tr("Close"),
+    )
+    if closed:
+        st.session_state.pop("task_preview_video_file", None)
+        return
+    st.video(preview_file)
+
 
 @st.fragment(run_every="2s")
 def _render_task_manager_entry():
@@ -1112,6 +1227,8 @@ def _infer_tts_server_from_voice(voice_name):
         return "elevenlabs"
     if voice.is_chatterbox_voice(voice_name):
         return "chatterbox"
+    if voice.is_fish_audio_voice(voice_name):
+        return "fish_audio"
     if voice.is_azure_v2_voice(voice_name):
         return "azure-tts-v2"
     return "azure-tts-v1"
@@ -1127,7 +1244,20 @@ def _apply_pending_task_restore():
     if not payload:
         return False
 
-    params = payload["params"]
+    _apply_restored_params(payload["params"])
+    st.session_state["task_restore_succeeded"] = True
+    logger.info(f"restored task configuration: {payload['task_id']}")
+    return True
+
+
+def _apply_restored_params(params):
+    """
+    把一份完整的生成参数写回页面控件状态。
+
+    历史任务恢复和设置预设导入使用同一份参数模型，因此共用同一个实现，避免
+    新增字段时只更新其中一条路径。调用方必须在渲染任何控件之前执行，否则
+    Streamlit 会拒绝修改已经实例化的控件状态。
+    """
     video_terms = params.get("video_terms") or ""
     if isinstance(video_terms, list):
         video_terms = ", ".join(str(term) for term in video_terms)
@@ -1238,8 +1368,6 @@ def _apply_pending_task_restore():
         _build_restore_upload_requirements(params)
     )
 
-    st.session_state["task_restore_succeeded"] = True
-    logger.info(f"restored task configuration: {payload['task_id']}")
     return True
 
 
@@ -1409,6 +1537,7 @@ support_locales = [
     "en-US",
     "es-ES",
     "fr-FR",
+    "it-IT",
     "ru-RU",
     "vi-VN",
     "th-TH",
@@ -2121,6 +2250,319 @@ def _render_cache_management_settings(panel):
 
 
 # -----------------------------------------------------------------------------
+# 设置预设导出导入与密钥备份
+# -----------------------------------------------------------------------------
+
+
+def _is_credential_config_key(key):
+    """判断一个配置项名称是否表示凭据。"""
+    return str(key).endswith(CREDENTIAL_KEY_SUFFIXES)
+
+
+def _is_backup_config_key(section_name, key):
+    """凭据本身及其配套配置项都属于密钥备份范围。"""
+    if _is_credential_config_key(key):
+        return True
+    if key in CREDENTIAL_COMPANION_KEYS.get(section_name, ()):
+        return True
+    return key in NON_LLM_COMPANION_KEYS.get(section_name, ())
+
+
+def _credential_widget_state_keys(section_name, key):
+    """
+    返回某个凭据配置项对应的全部 Streamlit 控件 key。
+
+    密码输入框都带 key，Streamlit 中 session_state 的值优先于控件的 value
+    参数。恢复备份后必须清除这些残留控件状态，否则页面会继续显示旧密钥，
+    并在下一次 rerun 把旧值重新写回配置，让恢复看起来没有生效。多个面板
+    共用同一个密钥时会各自持有控件状态，因此返回默认 key 和全部别名。
+    """
+    if section_name == "app":
+        default_widget_key = f"{key}_input"
+    else:
+        default_widget_key = f"{section_name}_{key}_input"
+    return (
+        default_widget_key,
+        *CREDENTIAL_WIDGET_STATE_ALIASES.get((section_name, key), ()),
+    )
+
+
+def _normalize_backup_value(value):
+    """归一化备份值，丢弃空字符串和空列表，避免恢复时覆盖成空配置。"""
+    if isinstance(value, list):
+        items = [
+            str(item).strip()
+            for item in value
+            if isinstance(item, (str, int, float)) and str(item).strip()
+        ]
+        return items or None
+    if isinstance(value, (str, int, float)) and not isinstance(value, bool):
+        text = str(value).strip()
+        return text or None
+    return None
+
+
+def _collect_key_backup(config_sections):
+    """从运行期配置分区中收集所有已填写的密钥及其配套配置项。"""
+    backup = {}
+    for section_name, section in config_sections.items():
+        if section_name in KEY_BACKUP_EXCLUDED_SECTIONS:
+            continue
+        entries = {}
+        for key, value in section.items():
+            if not _is_backup_config_key(section_name, key):
+                continue
+            normalized_value = _normalize_backup_value(value)
+            if normalized_value is not None:
+                entries[key] = normalized_value
+        if entries:
+            backup[section_name] = entries
+    return backup
+
+
+def _count_backup_keys(backup):
+    """统计备份中的配置项数量，用于界面提示和禁用空导出。"""
+    return sum(len(entries) for entries in backup.values())
+
+
+def _build_key_backup_payload(config_sections, app_version):
+    """构造密钥备份文件内容。"""
+    return {
+        "schema": KEY_BACKUP_SCHEMA,
+        "version": KEY_BACKUP_VERSION,
+        "app_version": str(app_version),
+        "keys": _collect_key_backup(config_sections),
+    }
+
+
+def _load_transfer_payload(raw_bytes, schema, version):
+    """
+    解析导出文件，并校验它确实来自本功能的同一版本。
+
+    用户可能上传任意 JSON。这里只接受声明了正确 schema 和版本的文件，让错误
+    提示停留在导入入口，而不是把无法识别的内容写进配置或控件状态。
+    Windows 编辑器可能保存带 BOM 的 JSON，因此按 utf-8-sig 解码。
+    """
+    payload = json.loads(raw_bytes.decode("utf-8-sig"))
+    if not isinstance(payload, dict):
+        raise ValueError("exported file must contain a JSON object")
+    if payload.get("schema") != schema:
+        raise ValueError(f"unexpected schema: {payload.get('schema')!r}")
+    if payload.get("version") != version:
+        raise ValueError(f"unsupported version: {payload.get('version')!r}")
+    return payload
+
+
+def _parse_key_backup(raw_bytes, config_sections):
+    """
+    解析密钥备份文件，只保留当前版本认识的分区和配置项。
+
+    备份文件可以手工编辑，也可能来自更新的版本。未知分区或非密钥配置项一律
+    忽略，避免通过导入功能改写与凭据无关的配置。
+    """
+    payload = _load_transfer_payload(raw_bytes, KEY_BACKUP_SCHEMA, KEY_BACKUP_VERSION)
+    keys = payload.get("keys")
+    if not isinstance(keys, dict):
+        raise ValueError("key backup file has no keys object")
+
+    restored = {}
+    for section_name, entries in keys.items():
+        if section_name not in config_sections:
+            continue
+        if section_name in KEY_BACKUP_EXCLUDED_SECTIONS:
+            continue
+        if not isinstance(entries, dict):
+            continue
+        section_entries = {}
+        for key, value in entries.items():
+            if not _is_backup_config_key(section_name, key):
+                continue
+            normalized_value = _normalize_backup_value(value)
+            if normalized_value is not None:
+                section_entries[key] = normalized_value
+        if section_entries:
+            restored[section_name] = section_entries
+
+    if not restored:
+        raise ValueError("key backup file contains no restorable keys")
+    return restored
+
+
+def _build_settings_preset_payload(params, app_version):
+    """构造生成参数预设文件内容。"""
+    preset_params = {
+        key: value
+        for key, value in params.items()
+        if key not in PRESET_EXCLUDED_PARAM_KEYS
+    }
+    return {
+        "schema": SETTINGS_PRESET_SCHEMA,
+        "version": SETTINGS_PRESET_VERSION,
+        "app_version": str(app_version),
+        "params": preset_params,
+    }
+
+
+def _parse_settings_preset(raw_bytes):
+    """
+    解析预设文件并交给 VideoParams 校验。
+
+    预设可以在其它机器上生成，也可能被手工编辑。统一走模型校验可以复用既有
+    的取值范围约束，非法预设在导入时就被拒绝，而不是在生成任务时才失败。
+    """
+    payload = _load_transfer_payload(
+        raw_bytes, SETTINGS_PRESET_SCHEMA, SETTINGS_PRESET_VERSION
+    )
+    preset_params = payload.get("params")
+    if not isinstance(preset_params, dict):
+        raise ValueError("settings preset file has no params object")
+
+    params_input = {
+        key: value
+        for key, value in preset_params.items()
+        if key not in PRESET_EXCLUDED_PARAM_KEYS
+    }
+    # video_subject 是 VideoParams 的必填字段，但预设允许只保存风格设置。
+    params_input.setdefault("video_subject", "")
+    return VideoParams.model_validate(params_input).model_dump(mode="json")
+
+
+def _apply_key_backup(restored_keys):
+    """把解析后的密钥写回运行期配置，并清除对应控件的残留状态。"""
+    restored_count = 0
+    for section_name, entries in restored_keys.items():
+        for key, value in entries.items():
+            _set_runtime_config(section_name, key, value)
+            for widget_key in _credential_widget_state_keys(section_name, key):
+                st.session_state.pop(widget_key, None)
+            restored_count += 1
+    # ElevenLabs 音色列表按密钥缓存，换用另一份备份后必须重新拉取。
+    for cache_key in list(st.session_state.keys()):
+        if str(cache_key).startswith("elevenlabs_voices_"):
+            del st.session_state[cache_key]
+    return restored_count
+
+
+def _apply_pending_settings_preset():
+    """在渲染任何控件之前应用已导入的预设。"""
+    preset_params = st.session_state.pop("settings_preset_payload", None)
+    if not preset_params:
+        return False
+
+    _apply_restored_params(preset_params)
+    logger.info("applied imported settings preset")
+    return True
+
+
+def _render_settings_transfer(params):
+    """渲染生成参数预设的导出与导入入口。"""
+    with st.expander(tr("Settings Preset"), expanded=False):
+        st.caption(tr("Settings Preset Help"))
+        preset_payload = _build_settings_preset_payload(
+            params.model_dump(mode="json"), config.project_version
+        )
+        st.download_button(
+            tr("Export Settings"),
+            data=json.dumps(preset_payload, ensure_ascii=False, indent=2).encode(
+                "utf-8"
+            ),
+            file_name=SETTINGS_PRESET_FILE_NAME,
+            mime="application/json",
+            use_container_width=True,
+            key="export_settings_preset_button",
+            icon=":material/download:",
+        )
+        uploaded_preset = st.file_uploader(
+            tr("Import Settings"),
+            type=["json"],
+            key="settings_preset_uploader",
+        )
+        if uploaded_preset is None:
+            return
+        # 上传的文件在之后每次 rerun 都会重新出现。记录已处理的文件标识，
+        # 避免用户改完控件后被同一个预设反复覆盖。
+        if st.session_state.get("settings_preset_file_id") == uploaded_preset.file_id:
+            return
+
+        st.session_state["settings_preset_file_id"] = uploaded_preset.file_id
+        try:
+            preset_params = _parse_settings_preset(uploaded_preset.getvalue())
+        except Exception as e:
+            logger.warning(f"failed to import settings preset: {e}")
+            st.error(tr("Settings Preset Import Failed"))
+            return
+
+        st.session_state["settings_preset_payload"] = preset_params
+        st.rerun()
+
+
+def _render_key_backup_settings(panel):
+    """渲染密钥备份的导出与恢复入口。"""
+    with panel:
+        backup_message = st.session_state.pop("key_backup_message", None)
+        if backup_message:
+            message_type, message = backup_message
+            if message_type == "success":
+                st.success(message)
+            else:
+                st.error(message)
+
+        st.caption(tr("Key Backup Help"))
+        st.warning(tr("Key Backup Warning"))
+
+        backup_payload = _build_key_backup_payload(
+            _RUNTIME_CONFIG_SECTIONS, config.project_version
+        )
+        backup_key_count = _count_backup_keys(backup_payload["keys"])
+        st.caption(tr("Key Backup Summary").format(count=backup_key_count))
+        st.download_button(
+            tr("Export Keys"),
+            data=json.dumps(backup_payload, ensure_ascii=False, indent=2).encode(
+                "utf-8"
+            ),
+            file_name=KEY_BACKUP_FILE_NAME,
+            mime="application/json",
+            disabled=backup_key_count == 0,
+            use_container_width=True,
+            key="export_key_backup_button",
+            icon=":material/download:",
+        )
+
+        uploaded_backup = st.file_uploader(
+            tr("Import Keys"),
+            type=["json"],
+            key="key_backup_uploader",
+        )
+        if uploaded_backup is None:
+            return
+        if st.session_state.get("key_backup_file_id") == uploaded_backup.file_id:
+            return
+
+        st.session_state["key_backup_file_id"] = uploaded_backup.file_id
+        try:
+            restored_keys = _parse_key_backup(
+                uploaded_backup.getvalue(), _RUNTIME_CONFIG_SECTIONS
+            )
+        except Exception as e:
+            logger.warning(f"failed to import key backup: {e}")
+            st.session_state["key_backup_message"] = (
+                "error",
+                tr("Key Restore Failed"),
+            )
+        else:
+            restored_count = _apply_key_backup(restored_keys)
+            _save_runtime_config()
+            logger.info(f"restored keys from backup file: count={restored_count}")
+            st.session_state["key_backup_message"] = (
+                "success",
+                tr("Keys Restored").format(count=restored_count),
+            )
+        # 主页面上的 TTS 密钥输入框也需要读取恢复后的配置，因此整页刷新。
+        # 设置弹窗的打开状态保存在 session_state 中，刷新后会重新展开。
+        st.rerun(scope="app")
+
+
+# -----------------------------------------------------------------------------
 # 设置与提示词弹窗
 # -----------------------------------------------------------------------------
 
@@ -2142,16 +2584,98 @@ def _render_settings_dialog():
         (
             middle_config_panel,
             right_config_panel,
+            key_backup_panel,
             cache_config_panel,
+            publish_config_panel,
             left_config_panel,
         ) = st.tabs(
             [
                 tr("LLM Settings Tab"),
                 tr("Material API Tab"),
+                tr("Key Backup Tab"),
                 tr("Cache Management Tab"),
+                tr("Auto-Publish Settings"),
                 tr("Interface Settings Tab"),
             ]
         )
+
+        with publish_config_panel:
+            st.write(tr("Automatically publish generated videos to social media using upload-post.com"))
+            st.info(
+                tr("Upload-Post Setup Guide").format(
+                    api_keys_url=UPLOAD_POST_API_KEYS_URL,
+                    manage_users_url=UPLOAD_POST_MANAGE_USERS_URL,
+                )
+            )
+
+            is_enabled = config.app.get("upload_post_enabled", False)
+            is_auto = config.app.get("upload_post_auto_upload", False)
+
+            # 两个键各自独立:enabled 允许外部流程调用 Upload-Post,
+            # auto_upload 才决定渲染完成后是否自动发布。合并成一个复选框会在
+            # 两键不一致的配置下,仅打开设置对话框就把 enabled 改写为 False。
+            upload_post_enabled = st.checkbox(
+                tr("Enable Upload-Post Integration"),
+                value=is_enabled,
+                key="upload_post_enabled_checkbox"
+            )
+            if upload_post_enabled != is_enabled:
+                _set_runtime_config("app", "upload_post_enabled", upload_post_enabled)
+
+            upload_post_auto_upload = st.checkbox(
+                tr("Enable Auto-Publish"),
+                value=is_auto,
+                key="upload_post_auto_upload_checkbox"
+            )
+            if upload_post_auto_upload != is_auto:
+                _set_runtime_config("app", "upload_post_auto_upload", upload_post_auto_upload)
+
+            upload_post_api_key = st.text_input(
+                tr("Upload-Post API Key"),
+                value=config.app.get("upload_post_api_key", ""),
+                type="password",
+                help=tr("Upload-Post API Key Help").format(
+                    api_keys_url=UPLOAD_POST_API_KEYS_URL
+                ),
+                key="upload_post_api_key_input"
+            )
+            if upload_post_api_key != config.app.get("upload_post_api_key", ""):
+                _set_runtime_config("app", "upload_post_api_key", upload_post_api_key)
+
+            upload_post_username = st.text_input(
+                tr("Upload-Post Profile Username"),
+                value=config.app.get("upload_post_username", ""),
+                help=tr("Upload-Post Profile Username Help").format(
+                    manage_users_url=UPLOAD_POST_MANAGE_USERS_URL
+                ),
+                key="upload_post_username_input"
+            )
+            if upload_post_username != config.app.get("upload_post_username", ""):
+                _set_runtime_config("app", "upload_post_username", upload_post_username)
+
+            upload_post_platforms = st.multiselect(
+                tr("Platforms"),
+                options=["tiktok", "instagram", "youtube"],
+                default=config.app.get("upload_post_platforms", ["tiktok", "instagram"]),
+                help="Select platforms to publish to",
+                key="upload_post_platforms_multiselect"
+            )
+            if upload_post_platforms != config.app.get("upload_post_platforms", ["tiktok", "instagram"]):
+                _set_runtime_config("app", "upload_post_platforms", upload_post_platforms)
+
+            if "youtube" in upload_post_platforms:
+                yt_status_options = ["public", "private", "unlisted"]
+                yt_saved = config.app.get("upload_post_youtube_privacy_status", "public")
+                if yt_saved not in yt_status_options:
+                    yt_saved = "public"
+                upload_post_youtube_privacy_status = st.selectbox(
+                    tr("YouTube Privacy Status"),
+                    options=yt_status_options,
+                    index=yt_status_options.index(yt_saved),
+                    key="upload_post_youtube_privacy_status_selectbox"
+                )
+                if upload_post_youtube_privacy_status != config.app.get("upload_post_youtube_privacy_status", "public"):
+                    _set_runtime_config("app", "upload_post_youtube_privacy_status", upload_post_youtube_privacy_status)
 
         # 左侧面板 - 日志设置
         with left_config_panel:
@@ -2163,6 +2687,8 @@ def _render_settings_dialog():
             _set_runtime_config("ui", "hide_log", hide_log)
 
         _render_cache_management_settings(cache_config_panel)
+        # 密钥恢复会写回配置并清除密码控件状态，必须在下面渲染这些控件之前执行。
+        _render_key_backup_settings(key_backup_panel)
 
         # 中间面板 - LLM 设置
 
@@ -2478,6 +3004,53 @@ def _render_settings_dialog():
                 key="coverr_api_keys_input",
             )
             _save_material_api_keys("coverr_api_keys", coverr_api_key)
+
+            wavespeed_api_key = _get_material_api_keys("wavespeed_api_keys")
+            wavespeed_api_key = st.text_input(
+                tr("WaveSpeed API Key"),
+                value=wavespeed_api_key,
+                type="password",
+                key="wavespeed_api_keys_input",
+            )
+            _save_material_api_keys("wavespeed_api_keys", wavespeed_api_key)
+
+            seedance_api_key = st.text_input(
+                tr("Volcano Engine Ark API Key"),
+                value=str(config.app.get("volcengine_seedance_api_key", "") or ""),
+                type="password",
+                key="volcengine_seedance_api_key_input",
+            )
+            _set_runtime_config(
+                "app", "volcengine_seedance_api_key", seedance_api_key.strip()
+            )
+            seedance_model = st.text_input(
+                tr("Volcano Engine Seedance Model"),
+                value=str(
+                    config.app.get(
+                        "volcengine_seedance_model",
+                        volcengine_seedance.DEFAULT_MODEL_ID,
+                    )
+                    or volcengine_seedance.DEFAULT_MODEL_ID
+                ),
+                key="volcengine_seedance_model_input",
+            )
+            _set_runtime_config(
+                "app", "volcengine_seedance_model", seedance_model.strip()
+            )
+            seedance_base_url = st.text_input(
+                tr("Volcano Engine Ark Base URL"),
+                value=str(
+                    config.app.get(
+                        "volcengine_seedance_base_url",
+                        volcengine_seedance.DEFAULT_BASE_URL,
+                    )
+                    or volcengine_seedance.DEFAULT_BASE_URL
+                ),
+                key="volcengine_seedance_base_url_input",
+            )
+            _set_runtime_config(
+                "app", "volcengine_seedance_base_url", seedance_base_url.strip()
+            )
 
     _save_runtime_config()
 
@@ -3240,6 +3813,8 @@ def _render_video_settings(panel, params):
                 (tr("Pexels"), "pexels"),
                 (tr("Pixabay"), "pixabay"),
                 (tr("Coverr"), "coverr"),
+                (tr("WaveSpeed AI Video"), "wavespeed"),
+                (tr("Volcano Engine Seedance"), "volcengine_seedance"),
                 (tr("Shengsuan Cloud AI Video"), "loomloom"),
                 (tr("Local file"), "local"),
             ]
@@ -3256,6 +3831,11 @@ def _render_video_settings(panel, params):
                 )[value],
             )
             _set_runtime_config("app", "video_source", params.video_source)
+
+            if params.video_source == "wavespeed":
+                st.caption(tr("WaveSpeed AI Video Help"))
+            if params.video_source == "volcengine_seedance":
+                st.caption(tr("Volcano Engine Seedance Help"))
 
             if params.video_source == "local":
                 # Streamlit 的文件类型校验对扩展名大小写敏感，这里同时放行大小写两种形式。
@@ -3450,7 +4030,70 @@ def _render_video_settings(panel, params):
 
             if params.video_source == "loomloom":
                 _render_loomloom_video_settings(params)
+
+            if params.video_source == "wavespeed":
+                _render_wavespeed_video_settings(params)
+            if params.video_source == "volcengine_seedance":
+                _render_seedance_video_settings(params)
     return uploaded_files
+
+
+def _render_wavespeed_video_settings(params):
+    """
+    渲染 WaveSpeed 生成数量估算与计费确认。
+
+    生成按条计费，提交前必须让用户看到大致会生成多少段。估算完全在本地
+    完成：用配音时长估算区间除以片段时长得到需要覆盖的片段数。素材流程
+    本身按需逐段生成、凑够所需时长即停，因此实际生成数以运行时为准，
+    估算只用于量级提示，不参与任务执行。
+    """
+    clip_duration = max(int(params.video_clip_duration or 1), 1)
+    video_count = max(int(params.video_count or 1), 1)
+    estimated_range = _estimate_voiceover_duration_range(
+        str(params.video_script or ""),
+        params.voice_rate,
+    )
+    if estimated_range:
+        min_clips = max(math.ceil(estimated_range[0] * video_count / clip_duration), 1)
+        max_clips = max(
+            math.ceil(estimated_range[1] * video_count / clip_duration), min_clips
+        )
+        st.warning(
+            tr("WaveSpeed Billing Notice").format(min=min_clips, max=max_clips)
+        )
+    else:
+        st.warning(tr("WaveSpeed Billing Notice Without Script"))
+    st.checkbox(
+        tr("Confirm WaveSpeed Charge"),
+        key="wavespeed_confirm_charge",
+        help=tr("Confirm WaveSpeed Charge Help"),
+    )
+
+
+def _render_seedance_video_settings(params):
+    """展示预计付费任务数量，并要求用户明确确认方舟生成费用。"""
+    clip_duration = max(int(params.video_clip_duration or 1), 1)
+    video_count = max(int(params.video_count or 1), 1)
+    estimated_range = _estimate_voiceover_duration_range(
+        str(params.video_script or ""), params.voice_rate
+    )
+    if estimated_range:
+        min_clips = max(math.ceil(estimated_range[0] * video_count / clip_duration), 1)
+        max_clips = max(
+            math.ceil(estimated_range[1] * video_count / clip_duration), min_clips
+        )
+        st.warning(
+            tr("Volcano Engine Seedance Billing Notice").format(
+                min=min_clips, max=max_clips
+            )
+        )
+    else:
+        st.warning(tr("Volcano Engine Seedance Billing Notice Without Script"))
+    st.checkbox(
+        tr("Confirm Volcano Engine Seedance Charge"),
+        key="volcengine_seedance_confirm_charge",
+        help=tr("Confirm Volcano Engine Seedance Charge Help"),
+    )
 
 
 def _estimate_voiceover_duration_range(
@@ -4346,6 +4989,7 @@ def _render_audio_settings(panel, params):
                 ("minimax-tts", "MiniMax TTS"),
                 ("elevenlabs", "ElevenLabs TTS"),
                 ("chatterbox", "Chatterbox TTS"),
+                ("fish_audio", "Fish Audio TTS"),
             ]
 
             tts_server_values = [server_value for server_value, _ in tts_servers]
@@ -4415,6 +5059,8 @@ def _render_audio_settings(panel, params):
                 # 自托管 Chatterbox 服务的预置音色（来自 [chatterbox] voices 配置）
                 _sync_chatterbox_config_from_session_state()
                 filtered_voices = voice.get_chatterbox_voices()
+            elif selected_tts_server == "fish_audio":
+                filtered_voices = voice.get_fish_audio_voices()
             else:
                 # 获取Azure的声音列表
                 all_voices = voice.get_all_azure_voices(filter_locals=None)
@@ -4441,6 +5087,13 @@ def _render_audio_settings(panel, params):
                     return name.replace("-Female", "").replace("-Male", "")
                 if voice.is_minimax_voice(v):
                     return minimax_voice_labels.get(v, v.split(":", 1)[1])
+                if voice.is_fish_audio_voice(v):
+                    parts = v.split(":", 2)
+                    display_name = parts[2] if len(parts) >= 3 else v
+                    return (
+                        display_name.replace("Female", tr("Female"))
+                        .replace("Male", tr("Male"))
+                    )
                 return (
                     v.replace("Female", tr("Female"))
                     .replace("Male", tr("Male"))
@@ -4623,6 +5276,44 @@ def _render_audio_settings(panel, params):
                     key="elevenlabs_model_select",
                 )
                 _set_runtime_config("elevenlabs", "model_id", elevenlabs_model)
+
+            # Fish Audio API settings section
+            if tts_mode_enabled and (
+                selected_tts_server == "fish_audio"
+                or (voice_name and voice.is_fish_audio_voice(voice_name))
+            ):
+                saved_fish_api_key = (
+                    config.fish_audio.get("api_key", "")
+                    if hasattr(config, "fish_audio") and isinstance(config.fish_audio, dict)
+                    else ""
+                )
+                fish_audio_api_key = st.text_input(
+                    tr("Fish Audio API Key"),
+                    value=saved_fish_api_key,
+                    type="password",
+                    key="fish_audio_api_key_input",
+                )
+                _set_runtime_config("fish_audio", "api_key", fish_audio_api_key)
+
+                _fish_audio_models = [
+                    "s2.1-pro-free",
+                    "s2.1-pro",
+                    "s2-pro",
+                ]
+                saved_fish_model = (
+                    config.fish_audio.get("model", "s2.1-pro-free")
+                    if hasattr(config, "fish_audio") and isinstance(config.fish_audio, dict)
+                    else "s2.1-pro-free"
+                )
+                if saved_fish_model not in _fish_audio_models:
+                    saved_fish_model = "s2.1-pro-free"
+                fish_model = stable_selectbox(
+                    tr("Fish Audio Model"),
+                    options=_fish_audio_models,
+                    default_value=saved_fish_model,
+                    key="fish_audio_model_select",
+                )
+                _set_runtime_config("fish_audio", "model", fish_model)
 
             # Chatterbox API settings section (self-hosted, OpenAI-compatible)
             if tts_mode_enabled and (
@@ -5049,6 +5740,8 @@ def _render_generation_controls(
         # 已经得到明确处理，清除标记，避免后续普通生成继续显示旧提示。
         st.session_state.pop("task_restore_upload_requirements", None)
 
+    _render_settings_transfer(params)
+
     start_button = st.button(
         tr("Generate Video"),
         use_container_width=True,
@@ -5073,6 +5766,8 @@ def _render_generation_controls(
             "pexels",
             "pixabay",
             "coverr",
+            "wavespeed",
+            "volcengine_seedance",
             "loomloom",
             "local",
         ]:
@@ -5099,6 +5794,36 @@ def _render_generation_controls(
         ):
             _remove_active_generation_task(task_id)
             st.error(tr("Please Enter the Coverr API Key"))
+            st.stop()
+
+        if params.video_source == "wavespeed" and not config.app.get(
+            "wavespeed_api_keys", ""
+        ):
+            _remove_active_generation_task(task_id)
+            st.error(tr("Please Enter the WaveSpeed API Key"))
+            st.stop()
+
+        if params.video_source == "wavespeed" and not st.session_state.get(
+            "wavespeed_confirm_charge", False
+        ):
+            _remove_active_generation_task(task_id)
+            st.error(tr("Confirm WaveSpeed Charge Required"))
+            st.stop()
+
+        if params.video_source == "volcengine_seedance" and not (
+            volcengine_seedance.is_enabled(
+                config.snapshot_config_with_pending(config.app)
+            )
+        ):
+            _remove_active_generation_task(task_id)
+            st.error(tr("Please Enter the Volcano Engine Ark API Key"))
+            st.stop()
+
+        if params.video_source == "volcengine_seedance" and not st.session_state.get(
+            "volcengine_seedance_confirm_charge", False
+        ):
+            _remove_active_generation_task(task_id)
+            st.error(tr("Confirm Volcano Engine Seedance Charge Required"))
             st.stop()
 
         loomloom_video_request = None
@@ -5321,6 +6046,9 @@ def _render_application():
 
     if st.session_state.get("settings_dialog_open", False):
         _render_settings_dialog()
+
+    if _apply_pending_settings_preset():
+        st.success(tr("Settings Preset Imported"))
 
     restore_applied = _apply_pending_task_restore()
     restore_candidate_id = st.session_state.get("task_restore_candidate_id")
