@@ -635,7 +635,7 @@ class TestVideoService(unittest.TestCase):
             self.assertEqual(Path(output).read_bytes(), b"complete")
             self.assertEqual(
                 sorted(path.name for path in Path(temp_dir).iterdir()),
-                ["image.png.zoom-5.mp4"],
+                [Path(output).name],
             )
 
     def test_preprocess_video_rejects_material_outside_local_videos(self):
@@ -857,7 +857,7 @@ class TestVideoService(unittest.TestCase):
             vd.os.path,
             "abspath",
             return_value=r"C:\Users\Test User's Videos\clip.mp4",
-        ):
+        ), patch.object(vd.os, "sep", "\\"):
             self.assertEqual(
                 vd._format_ffmpeg_concat_path(
                     r"C:\Users\Test User's Videos\clip.mp4"
