@@ -675,6 +675,7 @@ class TestLiteLLMProvider(unittest.TestCase):
                 "minimax",
                 "mimo",
                 "iflytek",
+                "jalapeno",
                 "infistar",
                 "shengsuanyun",
                 "apimart",
@@ -2607,6 +2608,11 @@ class TestSocialMetadata(unittest.TestCase):
         tags = llm._normalize_hashtags("#fyp fyp, trending #Trending viral", count=2)
 
         self.assertEqual(tags, ["#fyp", "#trending"])
+
+    def test_normalize_hashtags_from_string_splits_cjk_separators(self):
+        tags = llm._normalize_hashtags("#旅行，#美食、#日常；#東京#グルメ", count=5)
+
+        self.assertEqual(tags, ["#旅行", "#美食", "#日常", "#東京", "#グルメ"])
 
     def test_normalize_hashtags_from_list_keeps_unicode_letters(self):
         tags = llm._normalize_hashtags(

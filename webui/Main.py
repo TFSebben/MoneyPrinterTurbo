@@ -54,6 +54,8 @@ from app.services import (
     material,
     metaso_minimax,
     muapi,
+    infistar_video,
+    jalapeno_video,
     ofox,
     subtitle,
     video,
@@ -128,8 +130,8 @@ VOICE_MODE_UPLOAD = "upload"
 VOICE_MODE_NONE = "none"
 LOOMLOOM_MAX_POLL_FAILURES = 5
 # WebUI 按素材能力分组展示视频来源，但底层仍保存原有 video_source 值。
-# AI 视频组与设置页共用同一业务顺序：合作服务商优先，并按秘塔、OFox、
-# 胜算云、火山引擎排列；其余服务随后展示。这样两个入口的顺序一致，同时
+# AI 视频组与设置页共用同一业务顺序：合作服务商优先，并按秘塔、OFox、胜算云、
+# 火山引擎、无限星河排列；其余服务随后展示。这样两个入口的顺序一致，同时
 # 不改变 config.toml、历史任务和 API 请求中的字段语义，旧用户无需迁移配置。
 VIDEO_SOURCE_GROUPS = {
     "stock_video": ("pexels", "pixabay", "coverr"),
@@ -138,6 +140,8 @@ VIDEO_SOURCE_GROUPS = {
         "ofox",
         "loomloom",
         "volcengine_seedance",
+        "infistar",
+        "jalapeno",
         "wavespeed",
         "muapi",
     ),
@@ -770,6 +774,8 @@ def _initialize_session_state():
         "loomloom_video_scene_autofill_digest": "",
         "wavespeed_confirm_charge": False,
         "volcengine_seedance_confirm_charge": False,
+        "infistar_confirm_charge": False,
+        "jalapeno_confirm_charge": False,
         "ofox_confirm_charge": False,
         "metaso_minimax_confirm_charge": False,
         "muapi_confirm_charge": False,
@@ -3714,7 +3720,7 @@ def _render_settings_dialog():
                 st.caption(tr("AI Video Generation APIs Help"))
 
                 # 视频生成 Provider 按赞助商优先展示，赞助商内部顺序
-                # 与 VIDEO_SOURCE_GROUPS 一致：秘塔、OFox、胜算云、火山引擎。
+                # 与 VIDEO_SOURCE_GROUPS 一致：秘塔、OFox、胜算云、火山引擎、无限星河。
                 st.markdown(f"**{tr('Metaso MiniMax H3')}**")
                 metaso_api_key = st.text_input(
                     tr("Metaso MiniMax API Key"),
@@ -3971,6 +3977,30 @@ def _render_settings_dialog():
                     "volcengine_seedance_base_url",
                     seedance_base_url.strip() or volcengine_seedance.DEFAULT_BASE_URL,
                 )
+
+                st.divider()
+                st.markdown(f"**{tr('Infistar AI Video')}**")
+                st.caption(tr("Infistar Video Key Help"))
+                infistar_video_key = st.text_input(
+                    tr("Infistar Video API Key"),
+                    value=str(config.app.get("infistar_video_api_key", "") or ""),
+                    type="password", key="infistar_video_api_key_input",
+                )
+                _set_runtime_config(
+                    "app", "infistar_video_api_key", infistar_video_key.strip()
+                )
+                infistar_video_base_url = st.text_input(
+                    tr("Infistar Video Base URL"),
+                    value=str(config.app.get("infistar_video_base_url", "") or ""),
+                    placeholder=infistar_video.DEFAULT_BASE_URL,
+                    key="infistar_video_base_url_input",
+                )
+                _set_runtime_config(
+                    "app", "infistar_video_base_url", infistar_video_base_url.strip()
+                )
+
+                st.divider()
+                _render_jalapeno_provider_settings()
 
                 st.divider()
                 wavespeed_api_key = _get_material_api_keys("wavespeed_api_keys")
@@ -5234,6 +5264,8 @@ def _render_video_settings(panel, params):
                 "coverr": tr("Coverr"),
                 "wavespeed": tr("WaveSpeed AI Video"),
                 "volcengine_seedance": tr("Volcano Engine Seedance"),
+                "infistar": tr("Infistar AI Video"),
+                "jalapeno": tr("Jalapeno Cloud AI Video"),
                 "ofox": tr("OFox AI Video"),
                 "metaso_minimax": tr("Metaso MiniMax H3"),
                 "muapi": tr("MuAPI AI Video"),
@@ -5268,6 +5300,16 @@ def _render_video_settings(panel, params):
                     _effective_loomloom_api_token()
                 )
 
+            if params.video_source == "infistar":
+                st.caption(tr("Infistar AI Video Help"))
+                selected_infistar_model = _render_infistar_model_selector()
+            if params.video_source == "jalapeno":
+                st.caption(tr("Jalapeno Cloud Video Help"))
+                snapshot = config.snapshot_config_with_pending(config.app)
+                st.caption(tr("Jalapeno Cloud Video Specification").format(
+                    model=str(snapshot.get("jalapeno_video_model", "") or jalapeno_video.DEFAULT_MODEL),
+                    resolution=str(snapshot.get("jalapeno_video_resolution", "") or jalapeno_video.DEFAULT_RESOLUTION),
+                ))
             if params.video_source == "wavespeed":
                 st.caption(tr("WaveSpeed AI Video Help"))
             if params.video_source == "volcengine_seedance":
@@ -5445,7 +5487,10 @@ def _render_video_settings(panel, params):
 
             # MiniMax H3 的远端时长范围是 4～15 秒。选择秘塔时使用完整能力
             # 范围，既避免 2/3 秒被按 4 秒计费，也让 WebUI 与 CLI、服务层一致。
-            if params.video_source == "metaso_minimax":
+            if params.video_source == "infistar":
+                # 每种模型先提供实测的固定规格；不把被 API 拒绝的时长发往付费接口。
+                video_clip_durations = [infistar_video.MODELS.get(selected_infistar_model, {"seconds": 5})["seconds"]]
+            elif params.video_source == "metaso_minimax":
                 video_clip_durations = list(
                     range(
                         metaso_minimax.DEFAULT_MIN_DURATION_SECONDS,
@@ -5576,6 +5621,13 @@ def _render_video_settings(panel, params):
                 _render_wavespeed_video_settings(params)
             if params.video_source == "volcengine_seedance":
                 _render_seedance_video_settings(params)
+            if params.video_source == "infistar":
+                st.warning(tr("Infistar Video Billing Notice"))
+                st.checkbox(tr("Confirm Infistar Charge"), key="infistar_confirm_charge")
+            if params.video_source == "jalapeno":
+                _sync_jalapeno_charge_confirmation(params)
+                st.warning(tr("Jalapeno Cloud Video Billing Notice"))
+                st.checkbox(tr("Confirm Jalapeno Cloud Charge"), key="jalapeno_confirm_charge")
             if params.video_source == "ofox":
                 _render_ofox_video_settings(params)
             if params.video_source == "metaso_minimax":
@@ -5641,6 +5693,87 @@ def _render_seedance_video_settings(params):
         key="volcengine_seedance_confirm_charge",
         help=tr("Confirm Volcano Engine Seedance Charge Help"),
     )
+
+
+def _render_jalapeno_provider_settings():
+    """默认值直接填入；独立视频配置不依赖当前选择的大模型 Provider。"""
+    snapshot = config.snapshot_config_with_pending(config.app)
+    st.markdown(f"**{tr('Jalapeno Cloud AI Video')}**")
+    key = st.text_input(
+        tr("Jalapeno Cloud Video API Key"),
+        value=str(snapshot.get("jalapeno_video_api_key", "") or ""),
+        type="password", key="jalapeno_video_api_key_input",
+        help=tr("Jalapeno Cloud Video Key Help"),
+    ).strip()
+    _set_runtime_config("app", "jalapeno_video_api_key", key)
+    if (not key and not os.getenv("JALAPENO_VIDEO_API_KEY", "").strip()
+            and str(snapshot.get("jalapeno_api_key", "") or "").strip()):
+        st.caption(tr("Jalapeno Cloud Video Key Reused"))
+    model = st.text_input(
+        tr("Jalapeno Cloud Video Model"),
+        value=str(snapshot.get("jalapeno_video_model", "") or jalapeno_video.DEFAULT_MODEL),
+        key="jalapeno_video_model_input",
+    ).strip()
+    _set_runtime_config("app", "jalapeno_video_model", model)
+    base = st.text_input(
+        tr("Jalapeno Cloud Video Base URL"),
+        value=str(snapshot.get("jalapeno_video_base_url", "") or jalapeno_video.DEFAULT_TASKS_URL),
+        help=tr("Jalapeno Cloud Video Base URL Help"),
+        key="jalapeno_video_base_url_input",
+    ).strip()
+    _set_runtime_config("app", "jalapeno_video_base_url", base)
+    resolution = stable_selectbox(
+        tr("Jalapeno Cloud Video Resolution"),
+        options=sorted(volcengine_seedance.SUPPORTED_RESOLUTIONS, key=lambda value: int(value[:-1])),
+        default_value=str(snapshot.get("jalapeno_video_resolution", "") or jalapeno_video.DEFAULT_RESOLUTION),
+        key="jalapeno_video_resolution_select",
+    )
+    _set_runtime_config("app", "jalapeno_video_resolution", resolution)
+
+
+def _sync_jalapeno_charge_confirmation(params):
+    """接入地址、模型、规格或有效 Key 变化后重新确认，避免沿用过期授权。"""
+    snapshot = config.snapshot_config_with_pending(config.app)
+    signature = _jalapeno_charge_signature(params, snapshot)
+    if st.session_state.get("jalapeno_charge_signature") != signature:
+        st.session_state["jalapeno_confirm_charge"] = False
+        st.session_state["jalapeno_charge_signature"] = signature
+
+
+def _jalapeno_charge_signature(params, snapshot):
+    """使用同一快照检查费用确认，避免渲染与点击提交之间读取不同配置。"""
+    return hashlib.sha256(json.dumps([
+        jalapeno_video.get_api_key(snapshot),
+        snapshot.get("jalapeno_video_base_url", ""),
+        snapshot.get("jalapeno_video_model", ""),
+        snapshot.get("jalapeno_video_resolution", ""),
+        str(params.video_aspect), params.video_clip_duration, params.video_count,
+    ]).encode()).hexdigest()
+
+
+def _render_infistar_model_selector():
+    """模型顺序固定为 Seedance、MiniMax、可灵；切换模型后重新确认费用。"""
+    snapshot = config.snapshot_config_with_pending(config.app)
+    configured = str(snapshot.get("infistar_video_model", "") or infistar_video.DEFAULT_MODEL)
+    options = list(infistar_video.MODELS)
+    if configured not in options:
+        options.append(configured)
+        st.error(tr("Infistar Video Invalid Model"))
+    model = stable_selectbox(
+        tr("Infistar Video Model"), options=options,
+        default_value=configured, key="infistar_video_model_select",
+        format_func=lambda value: infistar_video.MODELS.get(value, {"label": value})["label"],
+    )
+    if st.session_state.get("infistar_previous_video_model") != model:
+        st.session_state["infistar_confirm_charge"] = False
+        st.session_state["infistar_previous_video_model"] = model
+    _set_runtime_config("app", "infistar_video_model", model)
+    profile = infistar_video.MODELS.get(model)
+    if profile:
+        st.caption(tr("Infistar Video Specification").format(seconds=profile["seconds"], size=profile["size"]))
+        if model == "MiniMax-H3":
+            st.info(tr("Infistar MiniMax Landscape Help"))
+    return model
 
 
 def _render_ofox_video_settings(params):
@@ -8088,6 +8221,8 @@ def _render_generation_controls(
             voxcpm_prompt_text = _get_voxcpm_prompt_text()
 
         if params.video_source not in [
+            "infistar",
+            "jalapeno",
             "pexels",
             "pixabay",
             "coverr",
@@ -8154,6 +8289,32 @@ def _render_generation_controls(
             _remove_active_generation_task(task_id)
             st.error(tr("Confirm Volcano Engine Seedance Charge Required"))
             st.stop()
+
+        if params.video_source == "jalapeno":
+            try:
+                snapshot = config.snapshot_config_with_pending(config.app)
+                jalapeno_video_endpoint = jalapeno_video.endpoint(snapshot)
+                if (not st.session_state.get("jalapeno_confirm_charge", False)
+                        or _jalapeno_charge_signature(params, snapshot)
+                        != st.session_state.get("jalapeno_charge_signature")):
+                    raise jalapeno_video.JalapenoVideoError(tr("Confirm Jalapeno Cloud Charge Required"))
+            except jalapeno_video.JalapenoVideoError as exc:
+                _remove_active_generation_task(task_id)
+                st.error(str(exc))
+                st.stop()
+
+        if params.video_source == "infistar":
+            try:
+                snapshot = config.snapshot_config_with_pending(config.app)
+                if not infistar_video.is_enabled(snapshot):
+                    raise infistar_video.InfistarVideoError(tr("Please Enter the Infistar API Key"))
+                infistar_video.model_id(snapshot)
+                if not st.session_state.get("infistar_confirm_charge", False):
+                    raise infistar_video.InfistarVideoError(tr("Confirm Infistar Charge Required"))
+            except infistar_video.InfistarVideoError as exc:
+                _remove_active_generation_task(task_id)
+                st.error(str(exc))
+                st.stop()
 
         if params.video_source == "ofox" and not (
             ofox.is_enabled(config.snapshot_config_with_pending(config.app))
@@ -8415,6 +8576,8 @@ def _render_generation_controls(
                 voxcpm_reference_audio=voxcpm_reference_audio,
                 voxcpm_prompt_audio=voxcpm_prompt_audio,
                 voxcpm_prompt_text=voxcpm_prompt_text,
+                **({"jalapeno_video_endpoint": jalapeno_video_endpoint}
+                   if params.video_source == "jalapeno" else {}),
             )
             if loomloom_video_request is not None:
                 # 一个报价只允许提交一次。后台请求自带稳定幂等 ID；提交成功后
